@@ -50,6 +50,8 @@ const (
 	errorIssuerInit        = "IssuerInitError"
 	errorSavingCertificate = "SaveCertError"
 	errorConfig            = "ConfigError"
+	errorIssuerIssue       = "IssuerIssueFailed"
+	errorIssuerRenew       = "IssuerRenewalFailed"
 
 	reasonIssuingCertificate  = "IssueCert"
 	reasonRenewingCertificate = "RenewCert"
@@ -107,6 +109,7 @@ func (c *Controller) Sync(ctx context.Context, crt *v1alpha1.Certificate) (err e
 	// step zero: check if the referenced issuer exists and is ready
 	issuerObj, err := c.helper.GetGenericIssuer(crtCopy.Spec.IssuerRef, crtCopy.Namespace)
 	if k8sErrors.IsNotFound(err) {
+		c.metrics.IncrementSyncErrors(errorIssueNotFound)
 		c.Recorder.Eventf(crtCopy, corev1.EventTypeWarning, errorIssuerNotFound, err.Error())
 		return nil
 	}
@@ -134,6 +137,7 @@ func (c *Controller) Sync(ctx context.Context, crt *v1alpha1.Certificate) (err e
 
 	i, err := c.issuerFactory.IssuerFor(issuerObj)
 	if err != nil {
+		c.metrics.IncrementSyncErrors(errorIssuerInit)
 		c.Recorder.Eventf(crtCopy, corev1.EventTypeWarning, errorIssuerInit, "Internal error initialising issuer: %v", err)
 		return nil
 	}
@@ -145,21 +149,29 @@ func (c *Controller) Sync(ctx context.Context, crt *v1alpha1.Certificate) (err e
 
 	if key == nil || cert == nil {
 		dbg.Info("Invoking issue function as existing certificate does not exist")
-		return c.issue(ctx, i, crtCopy)
+		return c.recordSyncErrors(
+			c.issue(ctx, i, crtCopy),
+			errorIssuerIssue,
+		)
 	}
-
 	// begin checking if the TLS certificate is valid/needs a re-issue or renew
 	matches, matchErrs := c.certificateMatchesSpec(crtCopy, key, cert)
 	if !matches {
 		dbg.Info("invoking issue function due to certificate not matching spec", "diff", strings.Join(matchErrs, ", "))
-		return c.issue(ctx, i, crtCopy)
+		return c.recordSyncErrors(
+			c.issue(ctx, i, crtCopy),
+			errorIssuerIssue,
+		)
 	}
 
 	// check if the certificate needs renewal
 	needsRenew := c.Context.IssuerOptions.CertificateNeedsRenew(cert, crt)
 	if needsRenew {
 		dbg.Info("invoking issue function due to certificate needing renewal")
-		return c.issue(ctx, i, crtCopy)
+		return c.recordSyncErrors(
+			c.issue(ctx, i, crtCopy),
+			errorIssuerRenew,
+		)
 	}
 	// end checking if the TLS certificate is valid/needs a re-issue or renew
 
@@ -464,6 +476,13 @@ func (c *Controller) issue(ctx context.Context, issuer issuer.Interface, crt *v1
 	}
 
 	return nil
+}
+
+func (c *Controller) recordSyncErrors(err error, reason string) error {
+	if err != nil {
+		c.metrics.IncrementSyncErrors(reason)
+	}
+	return err
 }
 
 // staticTemporarySerialNumber is a fixed serial number we check for when

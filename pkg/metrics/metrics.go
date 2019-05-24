@@ -59,6 +59,17 @@ var CertificateExpiryTimeSeconds = prometheus.NewGaugeVec(
 	[]string{"name", "namespace"},
 )
 
+// ControllerSyncErrors is a Prometheus counter that records the
+// total number of errors during the controller's sync loop.
+var ControllerSyncErrors = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "controller_sync_errors_count",
+		Help:      "The number of errors syncing the controller.",
+	},
+	[]string{"reason"},
+)
+
 // ACMEClientRequestCount is a Prometheus summary to collect the number of
 // requests made to each endpoint with the ACME client.
 var ACMEClientRequestCount = prometheus.NewCounterVec(
@@ -93,6 +104,7 @@ type Metrics struct {
 	CertificateExpiryTimeSeconds     *prometheus.GaugeVec
 	ACMEClientRequestDurationSeconds *prometheus.SummaryVec
 	ACMEClientRequestCount           *prometheus.CounterVec
+	ControllerSyncErrors             *prometheus.CounterVec
 }
 
 func New(ctx context.Context) *Metrics {
@@ -112,6 +124,7 @@ func New(ctx context.Context) *Metrics {
 		CertificateExpiryTimeSeconds:     CertificateExpiryTimeSeconds,
 		ACMEClientRequestDurationSeconds: ACMEClientRequestDurationSeconds,
 		ACMEClientRequestCount:           ACMEClientRequestCount,
+		ControllerSyncErrors:             ControllerSyncErrors,
 	}
 
 	router.Handle("/metrics", promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{}))
@@ -141,6 +154,7 @@ func (m *Metrics) Start(stopCh <-chan struct{}) {
 	m.registry.MustRegister(m.CertificateExpiryTimeSeconds)
 	m.registry.MustRegister(m.ACMEClientRequestDurationSeconds)
 	m.registry.MustRegister(m.ACMEClientRequestCount)
+	m.registry.MustRegister(m.ControllerSyncErrors)
 
 	go func() {
 		log := log.WithValues("address", m.Addr)
@@ -174,6 +188,14 @@ func (m *Metrics) UpdateCertificateExpiry(crt *v1alpha1.Certificate, secretListe
 	}
 
 	updateX509Expiry(crt.Name, crt.Namespace, cert)
+}
+
+// IncrementSyncErrors increments the counter tracking sync errors and a
+// general reason, or indication of when the error occured.
+func (m *Metrics) IncrementSyncErrors(reason string) {
+	ControllerSyncErrors.With(prometheus.Labels{
+		"reason": reason,
+	})
 }
 
 func updateX509Expiry(name, namespace string, cert *x509.Certificate) {
